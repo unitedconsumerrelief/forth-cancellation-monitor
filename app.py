@@ -100,8 +100,12 @@ class GmailSlackMonitor:
             if not creds or not creds.valid:
                 # Only run OAuth flow in local development
                 if os.getenv('RENDER') or os.getenv('DYNO'):
-                    logger.error("OAuth flow not available in production. Please set OAuth credentials via environment variables.")
-                    raise Exception("OAuth credentials not configured for production deployment")
+                    logger.error("OAuth credentials are invalid or expired. Please check your environment variables:")
+                    logger.error("- GOOGLE_CLIENT_ID: Check if it's correct")
+                    logger.error("- GOOGLE_CLIENT_SECRET: Check if it's correct") 
+                    logger.error("- GOOGLE_REFRESH_TOKEN: May be expired, regenerate it")
+                    logger.error("To fix: Run the OAuth setup locally to get fresh credentials")
+                    raise Exception("OAuth credentials are invalid or expired. Please regenerate them.")
                 
                 logger.info("Starting OAuth flow")
                 flow = InstalledAppFlow.from_client_secrets_file(
