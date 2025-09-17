@@ -28,7 +28,7 @@ import requests
 from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv()
+load_dotenv('config.env')
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -88,33 +88,26 @@ class GmailSlackMonitor:
             raise
 
     def init_gmail_service(self):
-        """Initialize Gmail API service with Service Account or OAuth authentication."""
+        """Initialize Gmail API service with Service Account and Domain-Wide Delegation."""
         try:
             creds = None
             
-            # Try Service Account first (preferred for production)
+            # Try Service Account with Domain-Wide Delegation first
             if self._load_service_account_from_env():
-                logger.info("Loading Service Account credentials from environment variables")
+                logger.info("Loading Service Account credentials with Domain-Wide Delegation")
                 try:
-                    creds = self._get_service_account_credentials()
-                    # Test the credentials by refreshing them
-                    if creds and not creds.valid:
-                        creds.refresh(Request())
-                    logger.info("Service Account credentials validated successfully")
+                    creds = self._get_service_account_credentials_with_delegation()
+                    logger.info("Service Account credentials with delegation validated successfully")
                 except Exception as e:
-                    logger.error(f"Service Account credentials failed validation: {e}")
+                    logger.error(f"Service Account credentials with delegation failed: {e}")
                     creds = None
             elif os.path.exists('service-account-key.json'):
-                logger.info("Loading Service Account credentials from file")
+                logger.info("Loading Service Account credentials from file with delegation")
                 try:
-                    creds = service_account.Credentials.from_service_account_file(
-                        'service-account-key.json', scopes=SCOPES
-                    )
-                    if creds and not creds.valid:
-                        creds.refresh(Request())
-                    logger.info("Service Account credentials from file validated successfully")
+                    creds = self._get_service_account_credentials_from_file_with_delegation()
+                    logger.info("Service Account credentials from file with delegation validated successfully")
                 except Exception as e:
-                    logger.error(f"Service Account credentials from file failed: {e}")
+                    logger.error(f"Service Account credentials from file with delegation failed: {e}")
                     creds = None
             
             # Fallback to OAuth if Service Account failed
@@ -136,10 +129,10 @@ class GmailSlackMonitor:
             if not creds or not creds.valid:
                 # Only run OAuth flow in local development
                 if os.getenv('RENDER') or os.getenv('DYNO'):
-                    logger.error("No valid credentials found. Please set up Service Account or OAuth credentials:")
-                    logger.error("Service Account (recommended): Set GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY, etc.")
+                    logger.error("No valid credentials found. Please set up Service Account with Domain-Wide Delegation or OAuth:")
+                    logger.error("Service Account: Set GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY, GOOGLE_DELEGATED_EMAIL")
                     logger.error("OAuth: Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN")
-                    raise Exception("No valid Gmail credentials found. Please set up Service Account or OAuth.")
+                    raise Exception("No valid Gmail credentials found. Please set up Service Account with Domain-Wide Delegation or OAuth.")
                 
                 logger.info("Starting OAuth flow")
                 flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
@@ -164,7 +157,8 @@ class GmailSlackMonitor:
             'GOOGLE_SERVICE_ACCOUNT_EMAIL',
             'GOOGLE_PRIVATE_KEY',
             'GOOGLE_PROJECT_ID',
-            'GOOGLE_PRIVATE_KEY_ID'
+            'GOOGLE_PRIVATE_KEY_ID',
+            'GOOGLE_DELEGATED_EMAIL'  # Email to impersonate
         ]
         
         for var in required_vars:
@@ -175,8 +169,8 @@ class GmailSlackMonitor:
         logger.debug("All required Service Account environment variables are set")
         return True
 
-    def _get_service_account_credentials(self):
-        """Create Service Account credentials from environment variables."""
+    def _get_service_account_credentials_with_delegation(self):
+        """Create Service Account credentials with Domain-Wide Delegation from environment variables."""
         try:
             # Get and format the private key properly
             private_key = os.getenv('GOOGLE_PRIVATE_KEY', '')
@@ -185,6 +179,11 @@ class GmailSlackMonitor:
             
             # Handle both escaped and unescaped newlines
             private_key = private_key.replace('\\n', '\n')
+            
+            # Get the email to impersonate
+            delegated_email = os.getenv('GOOGLE_DELEGATED_EMAIL', '')
+            if not delegated_email:
+                raise ValueError("GOOGLE_DELEGATED_EMAIL environment variable is not set")
             
             service_account_info = {
                 "type": "service_account",
@@ -205,15 +204,42 @@ class GmailSlackMonitor:
                 if not service_account_info.get(field):
                     raise ValueError(f"Missing required field: {field}")
             
+            # Create credentials with delegation
             creds = service_account.Credentials.from_service_account_info(
                 service_account_info, scopes=SCOPES
             )
             
-            logger.info("Service Account credentials loaded from environment variables")
-            return creds
+            # Create delegated credentials
+            delegated_creds = creds.with_subject(delegated_email)
+            
+            logger.info(f"Service Account credentials with delegation loaded for {delegated_email}")
+            return delegated_creds
             
         except Exception as e:
-            logger.error(f"Failed to load Service Account credentials from environment: {e}")
+            logger.error(f"Failed to load Service Account credentials with delegation from environment: {e}")
+            raise
+
+    def _get_service_account_credentials_from_file_with_delegation(self):
+        """Create Service Account credentials with Domain-Wide Delegation from file."""
+        try:
+            # Get the email to impersonate
+            delegated_email = os.getenv('GOOGLE_DELEGATED_EMAIL', '')
+            if not delegated_email:
+                raise ValueError("GOOGLE_DELEGATED_EMAIL environment variable is not set")
+            
+            # Load credentials from file
+            creds = service_account.Credentials.from_service_account_file(
+                'service-account-key.json', scopes=SCOPES
+            )
+            
+            # Create delegated credentials
+            delegated_creds = creds.with_subject(delegated_email)
+            
+            logger.info(f"Service Account credentials with delegation loaded from file for {delegated_email}")
+            return delegated_creds
+            
+        except Exception as e:
+            logger.error(f"Failed to load Service Account credentials with delegation from file: {e}")
             raise
 
     def _load_credentials_from_env(self):
