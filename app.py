@@ -2,7 +2,7 @@
 """
 Gmail to Slack Monitor
 Polls Gmail inbox using search query and posts matching messages to Slack via webhook.
-Supports two modes: server (Flask health check) and worker (polling loop).
+Supports three modes: server (Flask health check), worker (polling loop), and combined (both).
 """
 
 import os
@@ -31,7 +31,7 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -260,11 +260,8 @@ class GmailSlackMonitor:
                 data = part.get('body', {}).get('data', '')
                 if data:
                     try:
-                        decoded = base64.urlsafe_b64decode(data).decode('utf-8')
-                        logger.debug(f"Extracted plain text body: {decoded[:100]}...")
-                        return decoded
-                    except Exception as e:
-                        logger.debug(f"Error decoding plain text: {e}")
+                        return base64.urlsafe_b64decode(data).decode('utf-8')
+                    except Exception:
                         return ""
             elif part.get('mimeType') == 'text/html':
                 data = part.get('body', {}).get('data', '')
@@ -274,46 +271,24 @@ class GmailSlackMonitor:
                         # Simple HTML to text conversion
                         import re
                         text = re.sub(r'<[^>]+>', '', html)
-                        # Clean up extra whitespace
-                        text = re.sub(r'\s+', ' ', text).strip()
-                        logger.debug(f"Extracted HTML body: {text[:100]}...")
                         return text
-                    except Exception as e:
-                        logger.debug(f"Error decoding HTML: {e}")
+                    except Exception:
                         return ""
             elif 'parts' in part:
                 for subpart in part['parts']:
                     result = extract_from_part(subpart)
                     if result:
                         return result
-    return ""
-
-        # Check if payload has direct text content
+            return ""
+        
         if payload.get('mimeType') == 'text/plain':
             data = payload.get('body', {}).get('data', '')
             if data:
                 try:
-                    decoded = base64.urlsafe_b64decode(data).decode('utf-8')
-                    logger.debug(f"Direct plain text body: {decoded[:100]}...")
-                    return decoded
-                except Exception as e:
-                    logger.debug(f"Error decoding direct plain text: {e}")
+                    return base64.urlsafe_b64decode(data).decode('utf-8')
+                except Exception:
+                    pass
         
-        # Check if payload has direct HTML content
-        elif payload.get('mimeType') == 'text/html':
-            data = payload.get('body', {}).get('data', '')
-            if data:
-                try:
-                    html = base64.urlsafe_b64decode(data).decode('utf-8')
-                    import re
-                    text = re.sub(r'<[^>]+>', '', html)
-                    text = re.sub(r'\s+', ' ', text).strip()
-                    logger.debug(f"Direct HTML body: {text[:100]}...")
-                    return text
-                except Exception as e:
-                    logger.debug(f"Error decoding direct HTML: {e}")
-        
-        # Check parts recursively
         if 'parts' in payload:
             for part in payload['parts']:
                 result = extract_from_part(part)
@@ -321,12 +296,7 @@ class GmailSlackMonitor:
                     body = result
                     break
         
-        # If no body found, use snippet as fallback
-        if not body:
-            body = payload.get('snippet', '')
-            logger.debug(f"Using snippet as body: {body[:100]}...")
-        
-        return body
+        return body or payload.get('snippet', '')
 
     def post_to_slack(self, message_data: Dict[str, Any]) -> bool:
         """Post message to Slack via webhook."""
@@ -337,7 +307,7 @@ class GmailSlackMonitor:
             # Format message
             text = f"📧 New Email: {message_data['subject']}"
             
-    blocks = [
+            blocks = [
                 {
                     "type": "header",
                     "text": {
@@ -367,6 +337,7 @@ class GmailSlackMonitor:
                 }
             ]
             
+            # Add body preview
             if message_data['body']:
                 blocks.append({
                     "type": "section",
@@ -376,6 +347,7 @@ class GmailSlackMonitor:
                     }
                 })
             
+            # Add Gmail button
             blocks.append({
                 "type": "actions",
                 "elements": [
@@ -436,8 +408,8 @@ class GmailSlackMonitor:
                 
                 # Skip if already processed
                 if self.is_message_processed(message_id):
-                        continue
-
+                    continue
+                
                 # Get full message details
                 message_data = self.get_message_details(message_id)
                 if not message_data:
