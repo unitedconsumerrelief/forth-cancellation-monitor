@@ -508,8 +508,27 @@ def main():
     if monitor.mode == 'worker':
         logger.info("Starting in worker mode")
         monitor.run_worker()
-    else:
+    elif monitor.mode == 'server':
         logger.info("Starting in server mode")
+        port = int(os.getenv('PORT', '10000'))
+        from waitress import serve
+        serve(app, host='0.0.0.0', port=port)
+    else:
+        # Combined mode: run both health server and worker
+        logger.info("Starting in combined mode (server + worker)")
+        
+        import threading
+        import time
+        
+        # Start the worker in a separate thread
+        def run_worker():
+            time.sleep(5)  # Wait for server to start
+            monitor.run_worker()
+        
+        worker_thread = threading.Thread(target=run_worker, daemon=True)
+        worker_thread.start()
+        
+        # Start the Flask server
         port = int(os.getenv('PORT', '10000'))
         from waitress import serve
         serve(app, host='0.0.0.0', port=port)

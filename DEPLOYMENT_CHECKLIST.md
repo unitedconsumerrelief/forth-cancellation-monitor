@@ -24,17 +24,17 @@
 
 ## 🚀 Render Deployment
 
-### 4. Deploy Web Service (Health Check)
+### 4. Deploy Single Web Service (Combined Mode)
 - [ ] Create new Web Service in Render
 - [ ] Connect GitHub repository
 - [ ] Set build command: `pip install -r requirements.txt`
 - [ ] Set start command: `python app.py`
 - [ ] Add environment variables:
-  - [ ] `MODE=server`
+  - [ ] `MODE=combined` (runs both health server and Gmail polling)
   - [ ] `SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...`
   - [ ] `SLACK_CHANNEL=forth-alerts`
   - [ ] `SLACK_USERNAME=Gmail Monitor`
-  - [ ] `GMAIL_QUERY=from:forth OR from:*@forth* OR subject:forth OR subject:*forth* newer_than:7d`
+  - [ ] `GMAIL_QUERY=from:noreply@forthcrm.com (subject:"Cancellation" OR subject:"Cancel" OR subject:"cancelled" OR subject:"cancelled") newer_than:7d`
   - [ ] `POLL_INTERVAL_SECONDS=60`
   - [ ] `TIMEZONE=Asia/Manila`
   - [ ] `RETURN_FULL_BODY=true`
@@ -44,14 +44,7 @@
   - [ ] `GOOGLE_REFRESH_TOKEN=...` (from step 2)
 - [ ] Deploy and note the URL
 
-### 5. Deploy Background Worker (Polling)
-- [ ] Create new Background Worker in Render
-- [ ] Connect same GitHub repository
-- [ ] Set build command: `pip install -r requirements.txt`
-- [ ] Set start command: `python app.py`
-- [ ] Add same environment variables as Web Service
-- [ ] Change `MODE=worker`
-- [ ] Deploy the worker
+**Note**: Combined mode runs both health endpoint AND Gmail polling in one deployment!
 
 ### 6. UptimeRobot Setup
 - [ ] Go to [UptimeRobot](https://uptimerobot.com/)

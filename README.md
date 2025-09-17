@@ -10,7 +10,7 @@ A Python service that polls a Gmail inbox using a Gmail search query and posts m
 - 🏥 **Health Monitoring**: Flask health endpoint for uptime monitoring
 - 🌍 **Timezone Support**: Configurable timezone for message timestamps
 - 🚀 **Render.com Ready**: Optimized for free tier deployment
-- 🔧 **Dual Mode**: Server mode (health checks) or Worker mode (polling)
+- 🔧 **Triple Mode**: Server mode (health checks), Worker mode (polling), or Combined mode (both)
 
 ## Project Structure
 
@@ -138,7 +138,7 @@ PORT=10000
    GOOGLE_REFRESH_TOKEN=your_refresh_token_here
    ```
 
-### 3. Deploy Web Service (Health Check)
+### 3. Deploy Single Web Service (Combined Mode)
 
 1. In Render dashboard, create **New** → **Web Service**
 2. Connect your GitHub repository
@@ -146,19 +146,10 @@ PORT=10000
    - **Build Command**: `pip install -r requirements.txt`
    - **Start Command**: `python app.py`
    - **Environment Variables**: Add all variables from your `.env` file PLUS the OAuth credentials from step 2
-   - **Environment**: Set `MODE=server`
+   - **Environment**: Set `MODE=combined` (runs both health server and Gmail polling)
 4. Deploy and note the URL (e.g., `https://your-app.onrender.com`)
 
-### 4. Deploy Background Worker (Polling)
-
-1. In Render dashboard, create **New** → **Background Worker**
-2. Connect the same GitHub repository
-3. Configure:
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `python app.py`
-   - **Environment Variables**: Same as web service
-   - **Environment**: Set `MODE=worker`
-4. Deploy the worker
+**Note**: The combined mode runs both the health endpoint AND Gmail polling in a single deployment, saving costs!
 
 ### 4. UptimeRobot Setup
 
