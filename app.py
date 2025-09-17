@@ -17,9 +17,7 @@ from flask import Flask, jsonify
 from waitress import serve
 
 from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
 from google.oauth2 import service_account
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -88,64 +86,21 @@ class GmailSlackMonitor:
             raise
 
     def init_gmail_service(self):
-        """Initialize Gmail API service with Service Account and Domain-Wide Delegation."""
+        """Initialize Gmail API service with Service Account and Domain-Wide Delegation ONLY."""
         try:
-            creds = None
+            # Check if Service Account credentials are available
+            if not self._load_service_account_from_env():
+                logger.error("Service Account credentials not found. Required environment variables:")
+                logger.error("GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY, GOOGLE_PROJECT_ID, GOOGLE_PRIVATE_KEY_ID, GOOGLE_DELEGATED_EMAIL")
+                raise Exception("Service Account credentials not found. Please set all required environment variables.")
             
-            # Try Service Account with Domain-Wide Delegation first
-            if self._load_service_account_from_env():
-                logger.info("Loading Service Account credentials with Domain-Wide Delegation")
-                try:
-                    creds = self._get_service_account_credentials_with_delegation()
-                    logger.info("Service Account credentials with delegation validated successfully")
-                except Exception as e:
-                    logger.error(f"Service Account credentials with delegation failed: {e}")
-                    creds = None
-            elif os.path.exists('service-account-key.json'):
-                logger.info("Loading Service Account credentials from file with delegation")
-                try:
-                    creds = self._get_service_account_credentials_from_file_with_delegation()
-                    logger.info("Service Account credentials from file with delegation validated successfully")
-                except Exception as e:
-                    logger.error(f"Service Account credentials from file with delegation failed: {e}")
-                    creds = None
+            logger.info("Loading Service Account credentials with Domain-Wide Delegation")
+            creds = self._get_service_account_credentials_with_delegation()
+            logger.info("Service Account credentials with delegation loaded successfully")
             
-            # Fallback to OAuth if Service Account failed
-            if not creds:
-                if self._load_credentials_from_env():
-                    logger.info("Loading OAuth credentials from environment variables")
-                    try:
-                        creds = self._get_credentials_from_env()
-                        logger.info("OAuth credentials validated successfully")
-                    except Exception as e:
-                        logger.error(f"OAuth credentials failed validation: {e}")
-                        creds = None
-                else:
-                    # Fallback to file-based OAuth credentials (for local development)
-                    logger.info("Loading OAuth credentials from files")
-                    creds = self._load_credentials_from_file()
-            
-            # If no valid credentials, run OAuth flow (local only)
-            if not creds or not creds.valid:
-                # Only run OAuth flow in local development
-                if os.getenv('RENDER') or os.getenv('DYNO'):
-                    logger.error("No valid credentials found. Please set up Service Account with Domain-Wide Delegation or OAuth:")
-                    logger.error("Service Account: Set GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY, GOOGLE_DELEGATED_EMAIL")
-                    logger.error("OAuth: Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN")
-                    raise Exception("No valid Gmail credentials found. Please set up Service Account with Domain-Wide Delegation or OAuth.")
-                
-                logger.info("Starting OAuth flow")
-                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-                creds = flow.run_local_server(port=0)
-                
-                # Save credentials for next run (local only)
-                if not os.getenv('RENDER') and not os.getenv('DYNO'):
-                    with open('token.json', 'w') as token:
-                        token.write(creds.to_json())
-                    logger.info("Credentials saved to token.json")
-            
+            # Build Gmail service with Service Account credentials
             self.gmail_service = build('gmail', 'v1', credentials=creds)
-            logger.info("Gmail service initialized successfully")
+            logger.info("Gmail service initialized successfully with Service Account")
             
         except Exception as e:
             logger.error(f"Failed to initialize Gmail service: {e}")
@@ -242,49 +197,6 @@ class GmailSlackMonitor:
             logger.error(f"Failed to load Service Account credentials with delegation from file: {e}")
             raise
 
-    def _load_credentials_from_env(self):
-        """Check if OAuth credentials are available in environment variables."""
-        required_vars = [
-            'GOOGLE_CLIENT_ID',
-            'GOOGLE_CLIENT_SECRET', 
-            'GOOGLE_REFRESH_TOKEN'
-        ]
-        
-        for var in required_vars:
-            if not os.getenv(var):
-                logger.debug(f"Environment variable {var} not set")
-                return False
-        
-        logger.debug("All required OAuth environment variables are set")
-        return True
-
-    def _get_credentials_from_env(self):
-        """Create Credentials object from environment variables."""
-        try:
-            creds = Credentials(
-                token=None,
-                refresh_token=os.getenv('GOOGLE_REFRESH_TOKEN'),
-                token_uri='https://oauth2.googleapis.com/token',
-                client_id=os.getenv('GOOGLE_CLIENT_ID'),
-                client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
-                scopes=SCOPES
-            )
-            
-            # Refresh to get a valid access token
-            creds.refresh(Request())
-            logger.info("Refreshed credentials from environment variables")
-            return creds
-            
-        except Exception as e:
-            logger.error(f"Failed to load credentials from environment: {e}")
-            raise
-
-    def _load_credentials_from_file(self):
-        """Load credentials from token.json file."""
-        creds = None
-        if os.path.exists('token.json'):
-            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
-        return creds
 
     def poll_gmail(self):
         """Poll Gmail for new messages matching the query."""
