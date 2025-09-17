@@ -104,7 +104,7 @@ def send_test_message():
     """Send a test message to Slack."""
     
     # Your webhook URL
-    webhook_url = "https://hooks.slack.com/services/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"
+    webhook_url = "https://hooks.slack.com/services/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"
     
     print("🧪 Testing Slack Webhook")
     print("=" * 40)
