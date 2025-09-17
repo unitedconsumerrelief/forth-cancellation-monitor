@@ -110,12 +110,12 @@ class GmailSlackMonitor:
                 logger.info("Starting OAuth flow")
                 flow = InstalledAppFlow.from_client_secrets_file(
                     'credentials.json', SCOPES)
-                creds = flow.run_local_server(port=0)
+            creds = flow.run_local_server(port=0)
                 
                 # Save credentials for next run (local only)
                 if not os.getenv('RENDER') and not os.getenv('DYNO'):
                     with open('token.json', 'w') as token:
-                        token.write(creds.to_json())
+            token.write(creds.to_json())
                     logger.info("Credentials saved to token.json")
             
             self.gmail_service = build('gmail', 'v1', credentials=creds)
@@ -292,6 +292,7 @@ class GmailSlackMonitor:
                         return result
             return ""
         
+        # Check if this is a simple text/plain message
         if payload.get('mimeType') == 'text/plain':
             data = payload.get('body', {}).get('data', '')
             if data:
@@ -300,7 +301,21 @@ class GmailSlackMonitor:
                 except Exception:
                     pass
         
-        if 'parts' in payload:
+        # Check if this is a simple text/html message
+        elif payload.get('mimeType') == 'text/html':
+            data = payload.get('body', {}).get('data', '')
+            if data:
+                try:
+                    html = base64.urlsafe_b64decode(data).decode('utf-8')
+                    # Simple HTML to text conversion
+                    import re
+                    text = re.sub(r'<[^>]+>', '', html)
+                    return text
+                except Exception:
+                    pass
+        
+        # Check if this is a multipart message
+        elif 'parts' in payload:
             for part in payload['parts']:
                 result = extract_from_part(part)
                 if result:
