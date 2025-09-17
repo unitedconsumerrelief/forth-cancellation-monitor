@@ -57,9 +57,17 @@ class GmailSlackMonitor:
             logger.warning(f"Unknown timezone: {self.timezone}, using UTC")
             self.tz = pytz.UTC
         
-        # Initialize database and Gmail service
+        # Initialize database
         self.init_database()
-        self.init_gmail_service()
+        
+        # Initialize Gmail service (with error handling)
+        self.gmail_service = None
+        try:
+            self.init_gmail_service()
+        except Exception as e:
+            logger.error(f"Failed to initialize Gmail service during startup: {e}")
+            # Don't raise the exception here - let the app start for health checks
+            # The polling will handle the error gracefully
     
     def init_database(self):
         """Initialize SQLite database for tracking processed messages."""
@@ -87,20 +95,42 @@ class GmailSlackMonitor:
             # Try Service Account first (preferred for production)
             if self._load_service_account_from_env():
                 logger.info("Loading Service Account credentials from environment variables")
-                creds = self._get_service_account_credentials()
+                try:
+                    creds = self._get_service_account_credentials()
+                    # Test the credentials by refreshing them
+                    if creds and not creds.valid:
+                        creds.refresh(Request())
+                    logger.info("Service Account credentials validated successfully")
+                except Exception as e:
+                    logger.error(f"Service Account credentials failed validation: {e}")
+                    creds = None
             elif os.path.exists('service-account-key.json'):
                 logger.info("Loading Service Account credentials from file")
-                creds = service_account.Credentials.from_service_account_file(
-                    'service-account-key.json', scopes=SCOPES
-                )
-            # Fallback to OAuth
-            elif self._load_credentials_from_env():
-                logger.info("Loading OAuth credentials from environment variables")
-                creds = self._get_credentials_from_env()
-            else:
-                # Fallback to file-based OAuth credentials (for local development)
-                logger.info("Loading OAuth credentials from files")
-                creds = self._load_credentials_from_file()
+                try:
+                    creds = service_account.Credentials.from_service_account_file(
+                        'service-account-key.json', scopes=SCOPES
+                    )
+                    if creds and not creds.valid:
+                        creds.refresh(Request())
+                    logger.info("Service Account credentials from file validated successfully")
+                except Exception as e:
+                    logger.error(f"Service Account credentials from file failed: {e}")
+                    creds = None
+            
+            # Fallback to OAuth if Service Account failed
+            if not creds:
+                if self._load_credentials_from_env():
+                    logger.info("Loading OAuth credentials from environment variables")
+                    try:
+                        creds = self._get_credentials_from_env()
+                        logger.info("OAuth credentials validated successfully")
+                    except Exception as e:
+                        logger.error(f"OAuth credentials failed validation: {e}")
+                        creds = None
+                else:
+                    # Fallback to file-based OAuth credentials (for local development)
+                    logger.info("Loading OAuth credentials from files")
+                    creds = self._load_credentials_from_file()
             
             # If no valid credentials, run OAuth flow (local only)
             if not creds or not creds.valid:
@@ -148,11 +178,19 @@ class GmailSlackMonitor:
     def _get_service_account_credentials(self):
         """Create Service Account credentials from environment variables."""
         try:
+            # Get and format the private key properly
+            private_key = os.getenv('GOOGLE_PRIVATE_KEY', '')
+            if not private_key:
+                raise ValueError("GOOGLE_PRIVATE_KEY environment variable is not set")
+            
+            # Handle both escaped and unescaped newlines
+            private_key = private_key.replace('\\n', '\n')
+            
             service_account_info = {
                 "type": "service_account",
                 "project_id": os.getenv('GOOGLE_PROJECT_ID'),
                 "private_key_id": os.getenv('GOOGLE_PRIVATE_KEY_ID'),
-                "private_key": os.getenv('GOOGLE_PRIVATE_KEY').replace('\\n', '\n'),
+                "private_key": private_key,
                 "client_email": os.getenv('GOOGLE_SERVICE_ACCOUNT_EMAIL'),
                 "client_id": os.getenv('GOOGLE_CLIENT_ID', ''),
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
@@ -160,6 +198,12 @@ class GmailSlackMonitor:
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
                 "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{os.getenv('GOOGLE_SERVICE_ACCOUNT_EMAIL')}"
             }
+            
+            # Validate required fields
+            required_fields = ['project_id', 'private_key_id', 'private_key', 'client_email']
+            for field in required_fields:
+                if not service_account_info.get(field):
+                    raise ValueError(f"Missing required field: {field}")
             
             creds = service_account.Credentials.from_service_account_info(
                 service_account_info, scopes=SCOPES
@@ -219,6 +263,15 @@ class GmailSlackMonitor:
     def poll_gmail(self):
         """Poll Gmail for new messages matching the query."""
         try:
+            # Check if Gmail service is available
+            if not self.gmail_service:
+                logger.warning("Gmail service not initialized, attempting to reinitialize...")
+                try:
+                    self.init_gmail_service()
+                except Exception as e:
+                    logger.error(f"Failed to reinitialize Gmail service: {e}")
+                    return
+            
             logger.info(f"Polling Gmail with query: {self.gmail_query}")
             
             # Search for messages
@@ -496,13 +549,16 @@ app = Flask(__name__)
 @app.route('/health')
 def health():
     """Health check endpoint."""
+    gmail_status = 'connected' if monitor.gmail_service else 'disconnected'
+    
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
         'timezone': monitor.timezone,
         'mode': os.getenv('MODE', 'unknown'),
         'gmail_query': monitor.gmail_query,
-        'poll_interval': monitor.poll_interval
+        'poll_interval': monitor.poll_interval,
+        'gmail_service': gmail_status
     })
 
 def main():
