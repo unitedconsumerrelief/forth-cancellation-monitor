@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """
-Gmail to Slack Monitor
-Polls Gmail inbox using search query and posts matching messages to Slack via webhook.
-Supports three modes: server (Flask health check), worker (polling loop), and combined (both).
+Gmail to Slack notification service for Forth CRM cancellations.
+Monitors Gmail for specific emails and posts them to Slack.
 """
 
 import os
-import sqlite3
-import time
-import logging
-from datetime import datetime, timezone
-from typing import List, Dict, Any, Optional
-import json
 import base64
-import email
-from email.mime.text import MIMEText
+import sqlite3
+import logging
+import threading
+import time
+from datetime import datetime
+from typing import Dict, Any, List, Optional
 
-import pytz
 from flask import Flask, jsonify
+from waitress import serve
+
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+import pytz
 import requests
 from dotenv import load_dotenv
 
@@ -30,42 +30,38 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Gmail API scopes
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
 class GmailSlackMonitor:
+    """Monitor Gmail for specific emails and post to Slack."""
+    
     def __init__(self):
+        """Initialize the monitor with configuration from environment variables."""
+        self.gmail_query = os.getenv('GMAIL_QUERY', 'from:noreply@forthcrm.com (subject:"Cancellation" OR subject:"Cancel" OR subject:"cancelled" OR subject:"cancelled") newer_than:7d')
         self.slack_webhook_url = os.getenv('SLACK_WEBHOOK_URL')
-        self.slack_channel = os.getenv('SLACK_CHANNEL', '#alerts')
+        self.slack_channel = os.getenv('SLACK_CHANNEL', '#forth-alerts')
         self.slack_username = os.getenv('SLACK_USERNAME', 'Gmail Monitor')
-        self.gmail_query = os.getenv('GMAIL_QUERY', 'label:inbox is:unread newer_than:7d')
         self.poll_interval = int(os.getenv('POLL_INTERVAL_SECONDS', '60'))
         self.timezone = os.getenv('TIMEZONE', 'UTC')
-        self.return_full_body = os.getenv('RETURN_FULL_BODY', 'false').lower() == 'true'
-        self.mode = os.getenv('MODE', 'server')
+        self.return_full_body = os.getenv('RETURN_FULL_BODY', 'true').lower() == 'true'
         
         # Initialize timezone
         try:
             self.tz = pytz.timezone(self.timezone)
         except pytz.exceptions.UnknownTimeZoneError:
-            logger.warning(f"Unknown timezone {self.timezone}, falling back to UTC")
+            logger.warning(f"Unknown timezone: {self.timezone}, using UTC")
             self.tz = pytz.UTC
-            
-        # Initialize database
-        self.init_database()
         
-        # Initialize Gmail service
-        self.gmail_service = None
+        # Initialize database and Gmail service
+        self.init_database()
         self.init_gmail_service()
-
+    
     def init_database(self):
-        """Initialize SQLite database for deduplication."""
+        """Initialize SQLite database for tracking processed messages."""
         try:
             conn = sqlite3.connect('state.db')
             cursor = conn.cursor()
@@ -108,14 +104,13 @@ class GmailSlackMonitor:
                     raise Exception("OAuth credentials are invalid or expired. Please regenerate them.")
                 
                 logger.info("Starting OAuth flow")
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    'credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
+                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                creds = flow.run_local_server(port=0)
                 
                 # Save credentials for next run (local only)
                 if not os.getenv('RENDER') and not os.getenv('DYNO'):
                     with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+                        token.write(creds.to_json())
                     logger.info("Credentials saved to token.json")
             
             self.gmail_service = build('gmail', 'v1', credentials=creds)
@@ -129,66 +124,88 @@ class GmailSlackMonitor:
         """Check if OAuth credentials are available in environment variables."""
         required_vars = [
             'GOOGLE_CLIENT_ID',
-            'GOOGLE_CLIENT_SECRET',
+            'GOOGLE_CLIENT_SECRET', 
             'GOOGLE_REFRESH_TOKEN'
         ]
-        has_all_vars = all(os.getenv(var) for var in required_vars)
-        logger.info(f"Environment variables check: {has_all_vars}")
+        
         for var in required_vars:
-            value = os.getenv(var)
-            logger.info(f"{var}: {'SET' if value else 'NOT SET'}")
-        return has_all_vars
+            if not os.getenv(var):
+                logger.debug(f"Environment variable {var} not set")
+                return False
+        
+        logger.debug("All required OAuth environment variables are set")
+        return True
 
     def _get_credentials_from_env(self):
-        """Load OAuth credentials from environment variables."""
+        """Create Credentials object from environment variables."""
         try:
-            client_id = os.getenv('GOOGLE_CLIENT_ID')
-            client_secret = os.getenv('GOOGLE_CLIENT_SECRET')
-            refresh_token = os.getenv('GOOGLE_REFRESH_TOKEN')
-            
-            # Create credentials from environment variables
             creds = Credentials(
                 token=None,
-                refresh_token=refresh_token,
+                refresh_token=os.getenv('GOOGLE_REFRESH_TOKEN'),
                 token_uri='https://oauth2.googleapis.com/token',
-                client_id=client_id,
-                client_secret=client_secret,
+                client_id=os.getenv('GOOGLE_CLIENT_ID'),
+                client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
                 scopes=SCOPES
             )
             
-            # Refresh the credentials to get a valid access token
-            logger.info("Refreshing credentials from environment variables")
+            # Refresh to get a valid access token
             creds.refresh(Request())
-            logger.info("Credentials refreshed successfully from environment variables")
-            
+            logger.info("Refreshed credentials from environment variables")
             return creds
             
         except Exception as e:
             logger.error(f"Failed to load credentials from environment: {e}")
-            return None
+            raise
 
     def _load_credentials_from_file(self):
-        """Load OAuth credentials from file (local development)."""
+        """Load credentials from token.json file."""
+        creds = None
+        if os.path.exists('token.json'):
+            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+        return creds
+
+    def poll_gmail(self):
+        """Poll Gmail for new messages matching the query."""
         try:
-            token_file = 'token.json'
+            logger.info(f"Polling Gmail with query: {self.gmail_query}")
             
-            # Load existing token
-            if os.path.exists(token_file):
-                return Credentials.from_authorized_user_file(token_file, SCOPES)
+            # Search for messages
+            results = self.gmail_service.users().messages().list(
+                userId='me', 
+                q=self.gmail_query,
+                maxResults=10
+            ).execute()
             
-            # Check for credentials.json
-            if not os.path.exists('credentials.json'):
-                logger.error("credentials.json not found. Please download from Google Cloud Console.")
-                return None
+            messages = results.get('messages', [])
+            logger.info(f"Found {len(messages)} messages")
+            
+            new_messages = 0
+            for message in messages:
+                message_id = message['id']
                 
-            return None  # Will trigger OAuth flow
+                # Check if already processed
+                if self.is_message_processed(message_id):
+                    continue
+                
+                # Get message details
+                message_data = self.get_message_details(message_id)
+                if message_data:
+                    # Post to Slack
+                    if self.post_to_slack(message_data):
+                        # Mark as processed
+                        self.mark_message_processed(message_id)
+                        new_messages += 1
+                        logger.info(f"Posted new message to Slack: {message_data['subject']}")
+                    else:
+                        logger.error(f"Failed to post message to Slack: {message_data['subject']}")
+            
+            logger.info(f"Polling complete. Processed {new_messages} new messages")
             
         except Exception as e:
-            logger.error(f"Failed to load credentials from file: {e}")
-            return None
+            logger.error(f"Error during Gmail polling: {e}")
 
     def is_message_processed(self, message_id: str) -> bool:
-        """Check if message has already been processed."""
+        """Check if a message has already been processed."""
         try:
             conn = sqlite3.connect('state.db')
             cursor = conn.cursor()
@@ -197,11 +214,11 @@ class GmailSlackMonitor:
             conn.close()
             return result is not None
         except Exception as e:
-            logger.error(f"Error checking processed message: {e}")
+            logger.error(f"Error checking if message is processed: {e}")
             return False
 
     def mark_message_processed(self, message_id: str):
-        """Mark message as processed."""
+        """Mark a message as processed."""
         try:
             conn = sqlite3.connect('state.db')
             cursor = conn.cursor()
@@ -212,41 +229,36 @@ class GmailSlackMonitor:
             logger.error(f"Error marking message as processed: {e}")
 
     def get_message_details(self, message_id: str) -> Optional[Dict[str, Any]]:
-        """Get full message details from Gmail API."""
+        """Get detailed information about a specific message."""
         try:
             message = self.gmail_service.users().messages().get(
-                userId='me', id=message_id, format='full'
+                userId='me', 
+                id=message_id,
+                format='full'
             ).execute()
             
-            headers = message['payload'].get('headers', [])
-            header_dict = {h['name'].lower(): h['value'] for h in headers}
+            payload = message['payload']
+            headers = payload.get('headers', [])
             
-            # Extract basic info
-            subject = header_dict.get('subject', 'No Subject')
-            sender = header_dict.get('from', 'Unknown Sender')
-            date_str = header_dict.get('date', '')
+            # Extract headers
+            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+            sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+            date_str = next((h['value'] for h in headers if h['name'] == 'Date'), '')
             
-            # Parse date
+            # Parse and format date
             try:
-                if date_str:
-                    # Parse email date format
-                    email_date = email.utils.parsedate_to_datetime(date_str)
-                    if email_date.tzinfo is None:
-                        email_date = email_date.replace(tzinfo=timezone.utc)
-                    local_date = email_date.astimezone(self.tz)
-                    formatted_date = local_date.strftime('%Y-%m-%d %H:%M:%S %Z')
-                else:
-                    formatted_date = 'Unknown Date'
-            except Exception:
-                formatted_date = date_str or 'Unknown Date'
+                from email.utils import parsedate_to_datetime
+                dt = parsedate_to_datetime(date_str)
+                if self.tz:
+                    dt = dt.astimezone(self.tz)
+                formatted_date = dt.strftime('%Y-%m-%d %H:%M:%S %Z')
+            except:
+                formatted_date = date_str
             
             # Extract body
-            body = self.extract_message_body(message['payload'])
-            if not self.return_full_body and len(body) > 200:
-                body = body[:200] + "..."
+            body = self.extract_message_body(payload)
             
             return {
-                'id': message_id,
                 'subject': subject,
                 'sender': sender,
                 'date': formatted_date,
@@ -390,20 +402,16 @@ class GmailSlackMonitor:
             })
             
             payload = {
+                "text": text,
                 "channel": self.slack_channel,
                 "username": self.slack_username,
-                "text": text,
                 "blocks": blocks
             }
             
-            response = requests.post(
-                self.slack_webhook_url,
-                json=payload,
-                timeout=10
-            )
+            response = requests.post(self.slack_webhook_url, json=payload)
             
             if response.status_code == 200:
-                logger.info(f"Successfully posted message {message_data['id']} to Slack")
+                logger.info("Message posted to Slack successfully")
                 return True
             else:
                 logger.error(f"Slack API error: {response.status_code} - {response.text}")
@@ -413,64 +421,22 @@ class GmailSlackMonitor:
             logger.error(f"Error posting to Slack: {e}")
             return False
 
-    def poll_gmail(self):
-        """Poll Gmail for new messages matching the query."""
-        try:
-            logger.info(f"Polling Gmail with query: {self.gmail_query}")
-            
-            # Search for messages
-            results = self.gmail_service.users().messages().list(
-                userId='me',
-                q=self.gmail_query,
-                maxResults=10
-            ).execute()
-            
-            messages = results.get('messages', [])
-            logger.info(f"Found {len(messages)} messages")
-            
-            new_messages = 0
-            for message in messages:
-                message_id = message['id']
-                
-                # Skip if already processed
-                if self.is_message_processed(message_id):
-                    continue
-                
-                # Get full message details
-                message_data = self.get_message_details(message_id)
-                if not message_data:
-                        continue
-
-                # Post to Slack
-                if self.post_to_slack(message_data):
-                    self.mark_message_processed(message_id)
-                    new_messages += 1
-                    logger.info(f"Processed new message: {message_data['subject']}")
-                else:
-                    logger.error(f"Failed to post message {message_id} to Slack")
-            
-            logger.info(f"Polling complete. Processed {new_messages} new messages")
-            
-        except HttpError as e:
-            logger.error(f"Gmail API error during polling: {e}")
-        except Exception as e:
-            logger.error(f"Error during polling: {e}")
-
-    def run_worker(self):
-        """Run the polling worker loop."""
-        logger.info(f"Starting Gmail polling worker (interval: {self.poll_interval}s)")
-        
+    def start_polling(self):
+        """Start the Gmail polling loop."""
+        logger.info(f"Starting Gmail polling every {self.poll_interval} seconds")
         while True:
             try:
                 self.poll_gmail()
                 time.sleep(self.poll_interval)
             except KeyboardInterrupt:
-                logger.info("Worker stopped by user")
+                logger.info("Polling stopped by user")
                 break
             except Exception as e:
-                logger.error(f"Worker error: {e}")
-                logger.info(f"Retrying in {self.poll_interval} seconds...")
+                logger.error(f"Error in polling loop: {e}")
                 time.sleep(self.poll_interval)
+
+# Initialize the monitor
+monitor = GmailSlackMonitor()
 
 # Flask app for health checks
 app = Flask(__name__)
@@ -478,58 +444,38 @@ app = Flask(__name__)
 @app.route('/health')
 def health():
     """Health check endpoint."""
-    try:
-        # Get timezone from environment
-        timezone_str = os.getenv('TIMEZONE', 'UTC')
-        try:
-            tz = pytz.timezone(timezone_str)
-        except pytz.exceptions.UnknownTimeZoneError:
-            tz = pytz.UTC
-            
-        current_time = datetime.now(tz).isoformat()
-        return jsonify({
-            'ok': True,
-            'time': current_time,
-            'timezone': str(tz),
-            'mode': os.getenv('MODE', 'server')
-        })
-    except Exception as e:
-        return jsonify({
-            'ok': False,
-            'error': str(e)
-        }), 500
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'timezone': monitor.timezone,
+        'mode': os.getenv('MODE', 'unknown'),
+        'gmail_query': monitor.gmail_query,
+        'poll_interval': monitor.poll_interval
+    })
 
 def main():
-    """Main entry point."""
-    monitor = GmailSlackMonitor()
+    """Main function to start the service."""
+    mode = os.getenv('MODE', 'combined').lower()
     
-    if monitor.mode == 'worker':
-        logger.info("Starting in worker mode")
-        monitor.run_worker()
-    elif monitor.mode == 'server':
+    if mode == 'server':
         logger.info("Starting in server mode")
         port = int(os.getenv('PORT', '10000'))
-        from waitress import serve
+        serve(app, host='0.0.0.0', port=port)
+    elif mode == 'worker':
+        logger.info("Starting in worker mode")
+        monitor.start_polling()
+    elif mode == 'combined':
+        logger.info("Starting in combined mode")
+        # Start polling in a separate thread
+        polling_thread = threading.Thread(target=monitor.start_polling, daemon=True)
+        polling_thread.start()
+        
+        # Start Flask server in main thread
+        port = int(os.getenv('PORT', '10000'))
         serve(app, host='0.0.0.0', port=port)
     else:
-        # Combined mode: run both health server and worker
-        logger.info("Starting in combined mode (server + worker)")
-        
-        import threading
-        import time
-        
-        # Start the worker in a separate thread
-        def run_worker():
-            time.sleep(5)  # Wait for server to start
-            monitor.run_worker()
-        
-        worker_thread = threading.Thread(target=run_worker, daemon=True)
-        worker_thread.start()
-        
-        # Start the Flask server
-        port = int(os.getenv('PORT', '10000'))
-        from waitress import serve
-        serve(app, host='0.0.0.0', port=port)
+        logger.error(f"Unknown mode: {mode}")
+        return
 
 if __name__ == '__main__':
     main()
