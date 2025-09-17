@@ -97,11 +97,11 @@ class GmailSlackMonitor:
                 creds = self._load_credentials_from_file()
             
             # If no valid credentials, run OAuth flow (local only)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
                     logger.info("Refreshing expired credentials")
-            creds.refresh(Request())
-        else:
+                    creds.refresh(Request())
+                else:
                     # Only run OAuth flow in local development
                     if os.getenv('RENDER') or os.getenv('DYNO'):
                         logger.error("OAuth flow not available in production. Please set OAuth credentials via environment variables.")
@@ -110,12 +110,12 @@ class GmailSlackMonitor:
                     logger.info("Starting OAuth flow")
                     flow = InstalledAppFlow.from_client_secrets_file(
                         'credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
+                    creds = flow.run_local_server(port=0)
                 
                 # Save credentials for next run (local only)
                 if not os.getenv('RENDER') and not os.getenv('DYNO'):
                     with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+                        token.write(creds.to_json())
                     logger.info("Credentials saved to token.json")
             
             self.gmail_service = build('gmail', 'v1', credentials=creds)
