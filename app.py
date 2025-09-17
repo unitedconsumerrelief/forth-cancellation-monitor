@@ -18,6 +18,7 @@ from waitress import serve
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google.oauth2 import service_account
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -79,16 +80,25 @@ class GmailSlackMonitor:
             raise
 
     def init_gmail_service(self):
-        """Initialize Gmail API service with OAuth authentication."""
+        """Initialize Gmail API service with Service Account or OAuth authentication."""
         try:
             creds = None
             
-            # Try to load from environment variables first (for Render deployment)
-            if self._load_credentials_from_env():
+            # Try Service Account first (preferred for production)
+            if self._load_service_account_from_env():
+                logger.info("Loading Service Account credentials from environment variables")
+                creds = self._get_service_account_credentials()
+            elif os.path.exists('service-account-key.json'):
+                logger.info("Loading Service Account credentials from file")
+                creds = service_account.Credentials.from_service_account_file(
+                    'service-account-key.json', scopes=SCOPES
+                )
+            # Fallback to OAuth
+            elif self._load_credentials_from_env():
                 logger.info("Loading OAuth credentials from environment variables")
                 creds = self._get_credentials_from_env()
             else:
-                # Fallback to file-based credentials (for local development)
+                # Fallback to file-based OAuth credentials (for local development)
                 logger.info("Loading OAuth credentials from files")
                 creds = self._load_credentials_from_file()
             
@@ -96,12 +106,10 @@ class GmailSlackMonitor:
             if not creds or not creds.valid:
                 # Only run OAuth flow in local development
                 if os.getenv('RENDER') or os.getenv('DYNO'):
-                    logger.error("OAuth credentials are invalid or expired. Please check your environment variables:")
-                    logger.error("- GOOGLE_CLIENT_ID: Check if it's correct")
-                    logger.error("- GOOGLE_CLIENT_SECRET: Check if it's correct") 
-                    logger.error("- GOOGLE_REFRESH_TOKEN: May be expired, regenerate it")
-                    logger.error("To fix: Run the OAuth setup locally to get fresh credentials")
-                    raise Exception("OAuth credentials are invalid or expired. Please regenerate them.")
+                    logger.error("No valid credentials found. Please set up Service Account or OAuth credentials:")
+                    logger.error("Service Account (recommended): Set GOOGLE_SERVICE_ACCOUNT_EMAIL, GOOGLE_PRIVATE_KEY, etc.")
+                    logger.error("OAuth: Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN")
+                    raise Exception("No valid Gmail credentials found. Please set up Service Account or OAuth.")
                 
                 logger.info("Starting OAuth flow")
                 flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
@@ -118,6 +126,50 @@ class GmailSlackMonitor:
             
         except Exception as e:
             logger.error(f"Failed to initialize Gmail service: {e}")
+            raise
+
+    def _load_service_account_from_env(self):
+        """Check if Service Account credentials are available in environment variables."""
+        required_vars = [
+            'GOOGLE_SERVICE_ACCOUNT_EMAIL',
+            'GOOGLE_PRIVATE_KEY',
+            'GOOGLE_PROJECT_ID',
+            'GOOGLE_PRIVATE_KEY_ID'
+        ]
+        
+        for var in required_vars:
+            if not os.getenv(var):
+                logger.debug(f"Service Account environment variable {var} not set")
+                return False
+        
+        logger.debug("All required Service Account environment variables are set")
+        return True
+
+    def _get_service_account_credentials(self):
+        """Create Service Account credentials from environment variables."""
+        try:
+            service_account_info = {
+                "type": "service_account",
+                "project_id": os.getenv('GOOGLE_PROJECT_ID'),
+                "private_key_id": os.getenv('GOOGLE_PRIVATE_KEY_ID'),
+                "private_key": os.getenv('GOOGLE_PRIVATE_KEY').replace('\\n', '\n'),
+                "client_email": os.getenv('GOOGLE_SERVICE_ACCOUNT_EMAIL'),
+                "client_id": os.getenv('GOOGLE_CLIENT_ID', ''),
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "client_x509_cert_url": f"https://www.googleapis.com/robot/v1/metadata/x509/{os.getenv('GOOGLE_SERVICE_ACCOUNT_EMAIL')}"
+            }
+            
+            creds = service_account.Credentials.from_service_account_info(
+                service_account_info, scopes=SCOPES
+            )
+            
+            logger.info("Service Account credentials loaded from environment variables")
+            return creds
+            
+        except Exception as e:
+            logger.error(f"Failed to load Service Account credentials from environment: {e}")
             raise
 
     def _load_credentials_from_env(self):
