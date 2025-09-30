@@ -68,10 +68,20 @@ class GmailSlackMonitor:
             # Don't raise the exception here - let the app start for health checks
             # The polling will handle the error gracefully
     
+    def get_db_path(self):
+        """Get the appropriate database path for the environment."""
+        if os.getenv('RENDER'):
+            # On Render, use /tmp for persistence
+            return '/tmp/state.db'
+        else:
+            # Local development
+            return 'state.db'
+    
     def init_database(self):
         """Initialize SQLite database for tracking processed messages."""
         try:
-            conn = sqlite3.connect('state.db')
+            db_path = self.get_db_path()
+            conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS processed (
@@ -86,7 +96,7 @@ class GmailSlackMonitor:
             ''')
             conn.commit()
             conn.close()
-            logger.info("Database initialized successfully")
+            logger.info(f"Database initialized successfully at {db_path}")
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
             raise
@@ -108,7 +118,8 @@ class GmailSlackMonitor:
         if not record_id:
             return False
         try:
-            conn = sqlite3.connect('state.db')
+            db_path = self.get_db_path()
+            conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             cursor.execute('SELECT record_id FROM processed WHERE record_id = ?', (record_id,))
             result = cursor.fetchone()
@@ -292,7 +303,8 @@ class GmailSlackMonitor:
     def is_message_processed(self, message_id: str) -> bool:
         """Check if a message has already been processed."""
         try:
-            conn = sqlite3.connect('state.db')
+            db_path = self.get_db_path()
+            conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             cursor.execute('SELECT id FROM processed WHERE id = ?', (message_id,))
             result = cursor.fetchone()
@@ -305,7 +317,8 @@ class GmailSlackMonitor:
     def mark_message_processed(self, message_id: str, record_id: str = None):
         """Mark a message as processed with both message ID and record ID."""
         try:
-            conn = sqlite3.connect('state.db')
+            db_path = self.get_db_path()
+            conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             cursor.execute('INSERT OR IGNORE INTO processed (id, record_id) VALUES (?, ?)', 
                           (message_id, record_id))
