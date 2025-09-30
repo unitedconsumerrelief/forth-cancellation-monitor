@@ -10,6 +10,7 @@ import sqlite3
 import logging
 import threading
 import time
+import re
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
@@ -75,8 +76,13 @@ class GmailSlackMonitor:
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS processed (
                     id TEXT PRIMARY KEY,
+                    record_id TEXT,
                     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
+            ''')
+            # Create index for faster record_id lookups
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_record_id ON processed(record_id)
             ''')
             conn.commit()
             conn.close()
@@ -84,6 +90,33 @@ class GmailSlackMonitor:
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
             raise
+
+    def extract_record_id(self, body: str) -> Optional[str]:
+        """Extract Record ID from email body."""
+        try:
+            # Look for "Record ID: XXXXXXXX" pattern
+            match = re.search(r'Record ID:\s*(\d+)', body)
+            if match:
+                return match.group(1)
+            return None
+        except Exception as e:
+            logger.error(f"Error extracting record ID: {e}")
+            return None
+
+    def is_duplicate_by_record_id(self, record_id: str) -> bool:
+        """Check if a record ID has already been processed."""
+        if not record_id:
+            return False
+        try:
+            conn = sqlite3.connect('state.db')
+            cursor = conn.cursor()
+            cursor.execute('SELECT record_id FROM processed WHERE record_id = ?', (record_id,))
+            result = cursor.fetchone()
+            conn.close()
+            return result is not None
+        except Exception as e:
+            logger.error(f"Error checking if record ID is processed: {e}")
+            return False
 
     def init_gmail_service(self):
         """Initialize Gmail API service with Service Account and Domain-Wide Delegation ONLY."""
@@ -233,12 +266,22 @@ class GmailSlackMonitor:
                 # Get message details
                 message_data = self.get_message_details(message_id)
                 if message_data:
+                    # Extract record ID from email body
+                    record_id = self.extract_record_id(message_data.get('body', ''))
+                    
+                    # Check if already processed by record ID
+                    if record_id and self.is_duplicate_by_record_id(record_id):
+                        logger.info(f"Skipping duplicate record ID: {record_id}")
+                        # Still mark the message ID as processed to avoid re-checking
+                        self.mark_message_processed(message_id, record_id)
+                        continue
+
                     # Post to Slack
                     if self.post_to_slack(message_data):
-                        # Mark as processed
-                        self.mark_message_processed(message_id)
+                        # Mark as processed with both IDs
+                        self.mark_message_processed(message_id, record_id)
                         new_messages += 1
-                        logger.info(f"Posted new message to Slack: {message_data['subject']}")
+                        logger.info(f"Posted new message to Slack: {message_data['subject']} (Record ID: {record_id})")
                     else:
                         logger.error(f"Failed to post message to Slack: {message_data['subject']}")
             
@@ -260,13 +303,14 @@ class GmailSlackMonitor:
             logger.error(f"Error checking if message is processed: {e}")
             return False
 
-    def mark_message_processed(self, message_id: str):
-        """Mark a message as processed."""
+    def mark_message_processed(self, message_id: str, record_id: str = None):
+        """Mark a message as processed with both message ID and record ID."""
         try:
             conn = sqlite3.connect('state.db')
             cursor = conn.cursor()
-            cursor.execute('INSERT OR IGNORE INTO processed (id) VALUES (?)', (message_id,))
-            conn.commit()
+            cursor.execute('INSERT OR IGNORE INTO processed (id, record_id) VALUES (?, ?)', 
+                          (message_id, record_id))
+                    conn.commit()
             conn.close()
         except Exception as e:
             logger.error(f"Error marking message as processed: {e}")
@@ -456,7 +500,7 @@ class GmailSlackMonitor:
             if response.status_code == 200:
                 logger.info("Message posted to Slack successfully")
                 return True
-            else:
+    else:
                 logger.error(f"Slack API error: {response.status_code} - {response.text}")
                 return False
                 
