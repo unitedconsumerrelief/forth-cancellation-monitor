@@ -230,7 +230,6 @@ class GmailSlackMonitor:
             logger.error(f"Failed to load Service Account credentials with delegation from file: {e}")
             raise
 
-
     def poll_gmail(self):
         """Poll Gmail for new messages matching the query."""
         try:
@@ -275,7 +274,7 @@ class GmailSlackMonitor:
                         # Still mark the message ID as processed to avoid re-checking
                         self.mark_message_processed(message_id, record_id)
                         continue
-
+                    
                     # Post to Slack
                     if self.post_to_slack(message_data):
                         # Mark as processed with both IDs
@@ -310,7 +309,7 @@ class GmailSlackMonitor:
             cursor = conn.cursor()
             cursor.execute('INSERT OR IGNORE INTO processed (id, record_id) VALUES (?, ?)', 
                           (message_id, record_id))
-                    conn.commit()
+            conn.commit()
             conn.close()
         except Exception as e:
             logger.error(f"Error marking message as processed: {e}")
@@ -379,7 +378,6 @@ class GmailSlackMonitor:
                     try:
                         html = base64.urlsafe_b64decode(data).decode('utf-8')
                         # Simple HTML to text conversion
-                        import re
                         text = re.sub(r'<[^>]+>', '', html)
                         return text
                     except Exception:
@@ -407,7 +405,6 @@ class GmailSlackMonitor:
                 try:
                     html = base64.urlsafe_b64decode(data).decode('utf-8')
                     # Simple HTML to text conversion
-                    import re
                     text = re.sub(r'<[^>]+>', '', html)
                     return text
                 except Exception:
@@ -500,7 +497,7 @@ class GmailSlackMonitor:
             if response.status_code == 200:
                 logger.info("Message posted to Slack successfully")
                 return True
-    else:
+            else:
                 logger.error(f"Slack API error: {response.status_code} - {response.text}")
                 return False
                 
