@@ -1,3 +1,21 @@
+# Environment and Configuration Files
+config.env
+.env
+.env.local
+.env.production
+
+# Google OAuth and Service Account Files
+credentials.json
+service-account-key.json
+token.json
+*.json
+
+# Database Files
+state.db
+*.db
+*.sqlite
+*.sqlite3
+
 # Python
 __pycache__/
 *.py[cod]
@@ -21,32 +39,12 @@ wheels/
 *.egg
 MANIFEST
 
-# Virtual environments
-.env
-.venv
-env/
+# Virtual Environment
 venv/
+env/
 ENV/
 env.bak/
 venv.bak/
-
-# Environment variables
-.env
-.env.local
-.env.production
-
-# Database
-state.db
-*.db
-*.sqlite
-*.sqlite3
-
-# OAuth credentials (for local development only)
-credentials.json
-token.json
-
-# Environment files (use config.env as template)
-.env
 
 # IDE
 .vscode/
@@ -71,3 +69,13 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+/tmp/
+
+# OAuth related files (legacy)
+extract_oauth_credentials.py
+regenerate_oauth_credentials.py
+GMAIL_OAUTH_SETUP_GUIDE.md
+
+# Test files (optional - uncomment if you want to exclude)
+# test_*.py
+# debug_*.py

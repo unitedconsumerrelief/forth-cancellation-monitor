@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 import re
+import hashlib
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
@@ -87,12 +88,16 @@ class GmailSlackMonitor:
                 CREATE TABLE IF NOT EXISTS processed (
                     id TEXT PRIMARY KEY,
                     record_id TEXT,
+                    fallback_hash TEXT,
                     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            # Create index for faster record_id lookups
+            # Create indexes for faster lookups
             cursor.execute('''
                 CREATE INDEX IF NOT EXISTS idx_record_id ON processed(record_id)
+            ''')
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_fallback_hash ON processed(fallback_hash)
             ''')
             conn.commit()
             conn.close()
@@ -102,16 +107,44 @@ class GmailSlackMonitor:
             raise
 
     def extract_record_id(self, body: str) -> Optional[str]:
-        """Extract Record ID from email body."""
+        """Extract Record ID from email body using multiple patterns."""
         try:
-            # Look for "Record ID: XXXXXXXX" pattern
-            match = re.search(r'Record ID:\s*(\d+)', body)
+            if not body:
+                return None
+                
+            # Pattern 1: "Record ID: 123456" or "Record ID:123456"
+            match = re.search(r'Record ID:\s*(\d+)', body, re.IGNORECASE)
             if match:
                 return match.group(1)
+            
+            # Pattern 2: "ID: 123456" or "ID:123456"
+            match = re.search(r'ID:\s*(\d+)', body, re.IGNORECASE)
+            if match:
+                return match.group(1)
+            
+            # Pattern 3: "#123456" (hash followed by digits)
+            match = re.search(r'#(\d+)', body)
+            if match:
+                return match.group(1)
+            
             return None
         except Exception as e:
             logger.error(f"Error extracting record ID: {e}")
             return None
+
+    def generate_fallback_hash(self, subject: str, date: str) -> str:
+        """Generate a fallback hash for deduplication when no Record ID is available."""
+        try:
+            # Normalize subject and date for consistent hashing
+            normalized_subject = subject.strip().lower()
+            normalized_date = date.strip()
+            
+            # Create hash from subject + date
+            hash_input = f"{normalized_subject}|{normalized_date}"
+            return hashlib.md5(hash_input.encode('utf-8')).hexdigest()
+        except Exception as e:
+            logger.error(f"Error generating fallback hash: {e}")
+            return ""
 
     def is_duplicate_by_record_id(self, record_id: str) -> bool:
         """Check if a record ID has already been processed."""
@@ -127,6 +160,22 @@ class GmailSlackMonitor:
             return result is not None
         except Exception as e:
             logger.error(f"Error checking if record ID is processed: {e}")
+            return False
+
+    def is_duplicate_by_fallback_hash(self, fallback_hash: str) -> bool:
+        """Check if a fallback hash has already been processed."""
+        if not fallback_hash:
+            return False
+        try:
+            db_path = self.get_db_path()
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute('SELECT fallback_hash FROM processed WHERE fallback_hash = ?', (fallback_hash,))
+            result = cursor.fetchone()
+            conn.close()
+            return result is not None
+        except Exception as e:
+            logger.error(f"Error checking if fallback hash is processed: {e}")
             return False
 
     def init_gmail_service(self):
@@ -259,43 +308,75 @@ class GmailSlackMonitor:
             results = self.gmail_service.users().messages().list(
                 userId='me', 
                 q=self.gmail_query,
-                maxResults=10
+                maxResults=50
             ).execute()
             
             messages = results.get('messages', [])
-            logger.info(f"Found {len(messages)} messages")
+            logger.info(f"Found {len(messages)} messages matching query")
             
             new_messages = 0
+            skipped_by_message_id = 0
+            skipped_by_record_id = 0
+            skipped_by_fallback = 0
+            
             for message in messages:
                 message_id = message['id']
+                logger.debug(f"Processing message ID: {message_id}")
                 
-                # Check if already processed
+                # Check if already processed by message ID
                 if self.is_message_processed(message_id):
+                    logger.debug(f"Skipping message {message_id} - already processed by message ID")
+                    skipped_by_message_id += 1
                     continue
                 
                 # Get message details
                 message_data = self.get_message_details(message_id)
-                if message_data:
-                    # Extract record ID from email body
-                    record_id = self.extract_record_id(message_data.get('body', ''))
-                    
-                    # Check if already processed by record ID
-                    if record_id and self.is_duplicate_by_record_id(record_id):
-                        logger.info(f"Skipping duplicate record ID: {record_id}")
-                        # Still mark the message ID as processed to avoid re-checking
-                        self.mark_message_processed(message_id, record_id)
+                if not message_data:
+                    logger.warning(f"Failed to get message details for {message_id}")
+                    continue
+                
+                logger.debug(f"Processing email: {message_data.get('subject', 'No Subject')} from {message_data.get('sender', 'Unknown')}")
+                
+                # Extract record ID from email body
+                record_id = self.extract_record_id(message_data.get('body', ''))
+                logger.debug(f"Extracted Record ID: {record_id if record_id else 'None'}")
+                
+                # DUAL-LAYER DEDUPLICATION SYSTEM
+                # Layer 1: Record ID deduplication (primary)
+                if record_id and self.is_duplicate_by_record_id(record_id):
+                    logger.info(f"Skipping duplicate record ID: {record_id} for message {message_id}")
+                    # Mark message as processed to avoid re-checking
+                    self.mark_message_processed(message_id, record_id)
+                    skipped_by_record_id += 1
+                    continue
+                
+                # Layer 2: Fallback deduplication (when no Record ID)
+                if not record_id:
+                    fallback_hash = self.generate_fallback_hash(
+                        message_data.get('subject', ''), 
+                        message_data.get('date', '')
+                    )
+                    logger.debug(f"Generated fallback hash: {fallback_hash}")
+                    if fallback_hash and self.is_duplicate_by_fallback_hash(fallback_hash):
+                        logger.info(f"Skipping duplicate fallback hash: {fallback_hash} for message {message_id}")
+                        # Mark message as processed to avoid re-checking
+                        self.mark_message_processed(message_id, None, fallback_hash)
+                        skipped_by_fallback += 1
                         continue
-                    
-                    # Post to Slack
-                    if self.post_to_slack(message_data):
-                        # Mark as processed with both IDs
-                        self.mark_message_processed(message_id, record_id)
-                        new_messages += 1
-                        logger.info(f"Posted new message to Slack: {message_data['subject']} (Record ID: {record_id})")
-                    else:
-                        logger.error(f"Failed to post message to Slack: {message_data['subject']}")
+                else:
+                    fallback_hash = None
+                
+                # Post to Slack
+                logger.info(f"Posting new message to Slack: {message_data['subject']}")
+                if self.post_to_slack(message_data):
+                    # Mark as processed with all available identifiers
+                    self.mark_message_processed(message_id, record_id, fallback_hash)
+                    new_messages += 1
+                    logger.info(f"✅ Successfully posted to Slack: {message_data['subject']} (Record ID: {record_id}, Fallback: {fallback_hash})")
+                else:
+                    logger.error(f"❌ Failed to post message to Slack: {message_data['subject']}")
             
-            logger.info(f"Polling complete. Processed {new_messages} new messages")
+            logger.info(f"Polling complete. Results: {new_messages} new messages posted, {skipped_by_message_id} skipped by message ID, {skipped_by_record_id} skipped by record ID, {skipped_by_fallback} skipped by fallback hash")
             
         except Exception as e:
             logger.error(f"Error during Gmail polling: {e}")
@@ -314,14 +395,14 @@ class GmailSlackMonitor:
             logger.error(f"Error checking if message is processed: {e}")
             return False
 
-    def mark_message_processed(self, message_id: str, record_id: str = None):
-        """Mark a message as processed with both message ID and record ID."""
+    def mark_message_processed(self, message_id: str, record_id: str = None, fallback_hash: str = None):
+        """Mark a message as processed with message ID, record ID, and fallback hash."""
         try:
             db_path = self.get_db_path()
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
-            cursor.execute('INSERT OR IGNORE INTO processed (id, record_id) VALUES (?, ?)', 
-                          (message_id, record_id))
+            cursor.execute('INSERT OR IGNORE INTO processed (id, record_id, fallback_hash) VALUES (?, ?, ?)', 
+                          (message_id, record_id, fallback_hash))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -552,6 +633,38 @@ def health():
         'poll_interval': monitor.poll_interval,
         'gmail_service': gmail_status
     })
+
+@app.route('/sweep')
+def sweep():
+    """Manual fresh sweep endpoint for immediate processing."""
+    try:
+        logger.info("Manual sweep requested via /sweep endpoint")
+        
+        # Check if Gmail service is available
+        if not monitor.gmail_service:
+            return jsonify({
+                'status': 'error',
+                'message': 'Gmail service not available',
+                'timestamp': datetime.now().isoformat()
+            }), 503
+        
+        # Perform a fresh sweep
+        monitor.poll_gmail()
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Fresh sweep completed',
+            'timestamp': datetime.now().isoformat(),
+            'gmail_query': monitor.gmail_query
+        })
+        
+    except Exception as e:
+        logger.error(f"Error during manual sweep: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Sweep failed: {str(e)}',
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 def main():
     """Main function to start the service."""
